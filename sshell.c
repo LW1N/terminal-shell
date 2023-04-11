@@ -7,6 +7,8 @@
 
 int main(void)
 {
+	/* test comment */
+
         char cmd[CMDLINE_MAX];
 
         while (1) {
