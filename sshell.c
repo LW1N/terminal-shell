@@ -6,27 +6,57 @@
 
 #define CMDLINE_MAX 512
 
+// Linked list of program(head) and arguments
 struct prog{
-        char* pn; // program name
-        char argArr[16][2]; // program argument array
+        char* arg; // program argument
+	int argn; // number corresponding to number of argument(starting at 0)
+	struct prog* next;
 };
-/*
-// populates array with empty strings
-void newProg(struct prog *p, char* pp ){
-        strcpy(p->pn, pp);
 
-        for (int i=0; i< 16; i++){
-                strcpy(p->argArr[i], "");
-        }
+// Insert found argument into linked list
+void appendArg(struct prog** first_ref, char* arg){//, int argn){
+	// Create and allocate next argument
+	struct prog *new_arg = (struct prog*) malloc(sizeof(struct prog));
+	// Used to find end of list
+	struct prog *tail = *first_ref;
+	
+	// Initialize what the arg is
+	new_arg->arg = arg;	
+	// Since appended to end, points to NULL
+	new_arg->next = NULL;
+
+	// If linked list is empty or arg doesn't start with -
+	// new_prog becoms first prog(program name)
+	if(*first_ref == NULL || arg[0] != '-'){
+		new_arg->argn = 0;
+		*first_ref = new_arg;
+		return;
+	}
+
+
+
+	// Otherwise find last(tail) argument
+	while(tail->next != NULL){
+		tail = tail->next;
+	}
+
+	// Argument number is simply 1 more than previous
+	new_arg->argn = tail->argn + 1;	
+	
+// TESTING
+	printf("Arg: %s, Argn: %d\n", new_arg->arg, new_arg->argn);
+	
+	// Last tail points to next argument
+	tail->next = new_arg;
+	return;
 }
-*/
-
-
 
 
 int main(void){
         char cmd[CMDLINE_MAX];
         char cmdCopy[CMDLINE_MAX];
+	struct prog *first = NULL; // first argument is name of program being executed
+//	struct prog *current = NULL; // current argument being accessed
 
         while (1) {
                 char *nl;
@@ -50,32 +80,23 @@ int main(void){
                 if (nl)
                         *nl = '\0';
 
+
+		// Copy and parse retrieved command line
                 strcpy(cmdCopy,cmd);
-                char* token = strtok(cmdCopy, " ");
-
-                struct prog program;
-                program.pn = token;
+                // Tokenize command line by whitespace to retrieve arguments
+		char* token = strtok(cmdCopy, " ");
+		// First token is name of progam to be executed
+		appendArg(&first, token);
+		// Contine after first token
                 token = strtok(NULL, " ");
-                int count = 0;
                 while(token){
+			// If the token starts with -, then it is an argument
                         if (token[0] == '-'){
-                                strcpy(program.argArr[count], token);
-                                count++;
+				appendArg(&first, token);
                         }
-
+			// Grab next token
                         token = strtok(NULL, " ");
                 }
-
-                char args[48];
-                for (int i = 0; i < count+1; i ++){
-                        if(i == 0){
-                                strcpy(args, program.argArr[i]);
-                        }
-                        else{
-                                strcat(args, program.argArr[i]);
-                        }
-                }
-                printf("The args are %s\n", args);
 
 
                 /* Builtin command */
@@ -85,10 +106,8 @@ int main(void){
                 }
 
 
-
                 /* Regular command */
                 if(!fork()){
-
 			execlp("/bin/sh", "sh", "-c", cmd, (char*)NULL);
 			perror("execv");
 			exit(1);
@@ -97,10 +116,13 @@ int main(void){
 			int status;
 			int exit_status;
 			waitpid(-1, &status, 0);
+			// Check if child process completed(has exited)
 			if(WIFEXITED(status)){
+				// Grab exit status
 				exit_status = WEXITSTATUS(status);
+				// If exit_status is 0, print completion msg to stderr
 				if(!exit_status){
-					fprintf(stderr, "+ completed \'%s\' [%d]\n", program.pn, WEXITSTATUS(status));
+					fprintf(stderr, "+ completed \'%s\' [%d]\n", first->arg, WEXITSTATUS(status));
 				}
 			}
 		}
