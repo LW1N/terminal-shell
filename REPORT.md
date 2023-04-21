@@ -1,20 +1,21 @@
 # <b>Project 1 Report| Lucas Nguyen, Youssef Qteishat</b>
 
 ## <u>Parsing Command Line:</u>
+Initially, we suggested storing the program name and parameters in an array, but later we reliazed that it would be easier to parse through the command line if it were stored in a linked list.
 
-Initially, we suggested storing the program name and parameters in an array, but later we reliazed that it would be easier to parse throught he command line if were stored in a linked list. Becasue then, the head node would be the program name and the next nodes would be the program arguements.
+Given that tokenizing modifies the string, the shell takes a copy of the command line and then parse through it and check for names of programs. It would also check for symbols for output redirection, piping, etc.
 
-For example, if asked to print the working directory, the shell would look at the head node and compare it to the command name. If they match, then that program would be exceuted.
-
-And If the program has arguements, then the shell would look at the next nodes and excute the command acording to the next arguement(s).
+if no piping is requested, it the command line is tokenized by spaces between and checks for the programs and its arguements. But if it is requested, then the command line is tokenized by the "|" symbol, and the shell would parse through the code after the delimator.
 
 ## <u>Output Redirection:</u>
 
-Accounts for redirecting the output of proccess and pipes to other files.
+Accounts for redirecting the output of proccess and pipes to other files. This is mostly implemented using dup2 function.
 
 ## <u>Piping:</u>
 
 ## <u>Error Management:</u>
+
+For error management, the error messages are outputted based on the signal flags sent out from all the other fucntions.
 
 ## <u>Extra Features:</u>
 
