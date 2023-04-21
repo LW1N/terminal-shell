@@ -131,13 +131,12 @@ char* argstoString(struct prog* first_ref, int pipeF){
 	char* str =  malloc(CMDLINE_MAX);
 	// Pointer parses linked list from beginning to end
 	struct prog *ptr = first_ref;
-	// i increments length of str based on length of argument added to string 
-	// int i = 0;
-
+	// Grab program name, store in str, add a space and move on
 	strcpy(str, ptr->name);
 	strcat(str, " ");
 	ptr = ptr->next;
 	while(ptr != NULL){
+		// If last argument, don't need a space
 		if(ptr->next == NULL){
 			strcat(str, ptr->name);
 			break;
@@ -166,6 +165,30 @@ void close_pipes(int array[][2], int nump){
 	}
 }
 
+// Redirect of program/pipeline to an output file
+int output_Redirect(char* outfile_name){
+	// integer for file descriptor
+	int fd;
+	// Grab file descriptor of file
+	fd = open(outfile_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	// If cannot access output file, throw error and change outred flag to -1
+	if(fd == -1){
+		fprintf(stderr, "Error: cannot open output file\n");
+		return -1;
+	}
+	// Redirect stdout to file fd
+	dup2(fd, STDOUT_FILENO);
+	// If outredFlag == 2, combined redirection
+	// Redirect stderr to file fd
+	if(outredFlag == 2){
+		dup2(fd, STDERR_FILENO);
+	}
+	// Close fd
+	close(fd);
+	// Upon successful output redirection, outred flag is unchanged
+	return outredFlag;
+}
+
 // Pipe programs into other programs
 void pipeline(struct prog** first_ref){//, int numP){//int num_pipes){
 	// Number of childern = number of programs = num_pipes + 1
@@ -180,7 +203,10 @@ void pipeline(struct prog** first_ref){//, int numP){//int num_pipes){
 	char* command;
 	// Establish pipes depending on how many needed
 	for(int i = 0; i < num_pipes; i++){
-		pipe(fd[i]);
+		if(pipe(fd[i])){
+			return;
+		}
+		
 	}
 	// Pipe programs from and into other programs
 	for(int i = 0; i <= num_pipes; i++){
@@ -283,29 +309,6 @@ char* print_Exitstatus(struct prog** first_ref){
 	return str;
 }
 
-// Redirect of program/pipeline to an output file
-int output_Redirect(char* outfile_name){
-	// integer for file descriptor
-	int fd;
-	// Grab file descriptor of file
-	fd = open(outfile_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	// If cannot access output file, throw error and change outred flag to -1
-	if(fd == -1){
-		fprintf(stderr, "Error: cannot open output file\n");
-		return -1;
-	}
-	// Redirect stdout to file fd
-	dup2(fd, STDOUT_FILENO);
-	// If outredFlag == 2, combined redirection
-	// Redirect stderr to file fd
-	if(outredFlag == 2){
-		dup2(fd, STDERR_FILENO);
-	}
-	// Close fd
-	close(fd);
-	// Upon successful output redirection, outred flag is unchanged
-	return outredFlag;
-}
 
 
 // Parse command line and find program(s) to be executed
@@ -342,6 +345,8 @@ char* parseCmd(struct prog** first_ref, struct prog** firstpipe_ref, char comman
 	char* tokenCopy = token;
 	char* tokenCopy2 = token;
 
+	combred_check[0] = strstr(token, "&");
+	combred_check[1] = strstr(token, ">&");
 	// Parsing cmd string, loop of tokenizing until end of command line string
 	while(token){
 		// Two copies of the token in order for further tokenizing
@@ -350,7 +355,7 @@ char* parseCmd(struct prog** first_ref, struct prog** firstpipe_ref, char comman
 		// Check if there is output redirection needed
 		outred_check = strchr(token, '>');
 		// Check if there is combined redirection needed
-		combred_check[0] = strstr(token, "|&");
+		combred_check[0] = strstr(token, "&");
 		combred_check[1] = strstr(token, ">&");
 		
 		// Check if environment variable was included w/o piping
@@ -386,8 +391,8 @@ char* parseCmd(struct prog** first_ref, struct prog** firstpipe_ref, char comman
 			// *first_ref = firstarg;
 			*firstpipe_ref = firstpipe;
 
-			// If just a lone >, need to grab last program arg and outfile name
-			if((token[0] == '>' && strlen(outred_check) == 1) || strlen(combred_check[1]) == 2){
+			// If just a lone >(&), need to grab last program arg and outfile name
+			if(token[0] == '>' && ((strlen(outred_check) == 1) || strlen(combred_check[1]) == 2)){
 				token = strtok_r(NULL, delimiter, &save);
 				// If next token is NULL, missing command error
 				if(!token){
@@ -423,6 +428,7 @@ char* parseCmd(struct prog** first_ref, struct prog** firstpipe_ref, char comman
 
 			// Else if prog>out or prog> out, need to grab program argument
 			firstarg = appendArg(&firstarg, tokenCopy2);
+			fprintf(stderr, "CHeck it: %s\n", argstoString(firstarg, 0));
 			*first_ref = firstarg;
 
 			// If next token is NULL, prog> [could be prog> out or prog> NULL]
@@ -466,7 +472,7 @@ char* parseCmd(struct prog** first_ref, struct prog** firstpipe_ref, char comman
 				}
 				// If next token isn't null and there's an output redirection request
 				// Error: output redirection misplacement
-				if(token && outred_check){
+				if(token && (outred_check || combred_check[1])){
 					outredFlag = 1;
 					// Adjust pointers b/c of modifications
 					*first_ref = firstarg;
@@ -474,7 +480,6 @@ char* parseCmd(struct prog** first_ref, struct prog** firstpipe_ref, char comman
 					outfile = "";
 					return "";
 				}
-
 				// Append found program+arguments to firstpipe
 				firstpipe = appendArg(&firstpipe, argstoString(firstarg, 0));
 				// Increment # of programs everytime a program is appended to firstpipe
@@ -497,15 +502,20 @@ ParseEnd:
 	// If piping, grab missed last program to be piped
 	if(pipeFlag == 1 && firstarg != NULL){
 		// If last missed program was output redirection, redirect output
-		if(outred_check){
+		if(outred_check || combred_check[1]){
 			outredFlag = 1;
+			delimiter2 = ">";
+			if(combred_check[1]){
+				outredFlag = 2;
+				delimiter2 = ">&";
+			}
 			// Tokenize by > to separate last program from output file
-			token = strtok(argstoString(firstarg, 0), ">");
+			token = strtok(argstoString(firstarg, 0), delimiter2);
 			// Append last program to program list(firstpipe)
 			firstpipe = appendArg(&firstpipe, token);
 			num_programs++;
 			// Grab next token, which should be output file
-			token = strtok(NULL, ">");
+			token = strtok(NULL, delimiter2);
 			outfile = token;
 			*first_ref = firstarg;
 			*firstpipe_ref = firstpipe;
@@ -537,25 +547,17 @@ int main(void){
 		for(int i = 0; i < VAR_MAX; i++){
 			strcpy(envar[i], "");
 		}
-		// char* temp;
-		// char* ts;
 		
 		while (1){
 			char *nl;
-//			int retval;
-			// char* outfile;
 			// Empty/reset linked lists of args/progs
 			deleteArgs(&first);
 			deleteArgs(&firstPipe);
-			// Output redirection flag, if 0 no redirect - if 1 redirect
+			// With every prompt, reset global variables
 			outredFlag = 0;
-			// Piping flag, if 0 no pipe - if 1 pipe
 			pipeFlag = 0;
-			// Number of pipes
 			num_pipes = 0;
-			// Number of program arguments
 			num_args = 0;
-			// Number of programs in a pipeline
 			num_programs = 0;
 
 			// Provided Code
@@ -563,7 +565,10 @@ int main(void){
 			printf("sshell@ucd$ ");
 			fflush(stdout);
 			/* Get command line */
-			fgets(cmd, CMDLINE_MAX, stdin);
+			if(!fgets(cmd, CMDLINE_MAX, stdin)){
+				continue;
+			}
+
 			/* Print command line if stdin is not provided by terminal */
 			if (!isatty(STDIN_FILENO)) {
 				printf("%s", cmd);
@@ -595,9 +600,7 @@ int main(void){
 				strcpy(cmd, thing);
 				free(thing);
 			}
-			
-			
-			
+
 			// ERROR MANAGEMENT
 			if(outredFlag == -1 && outfile[0] == '\0'){
 				continue;
@@ -629,7 +632,7 @@ int main(void){
 				fprintf(stderr, "Error: missing command\n");
 				continue;
 			}
-			
+
 			// Builtin cd command
 			if(!strcmp(first->name, "cd")){
 				if(!first->next){
@@ -665,15 +668,16 @@ int main(void){
 					}
 				}
 			}
-						
+
 			/* Regular command */
 			// Child Process
 			if(!fork()){
-				/* Builtin commands */ 
 				// Builtin pwd command
 				if(!strcmp(first->name, "pwd")){
 					// Retrieve current working directory(cwd)
-					getcwd(cwd, sizeof(cwd));
+					if(!getcwd(cwd, sizeof(cwd))){
+						continue;
+					}
 					// Print cwd to stdout
 					printf("%s\n", cwd);
 					exit(1);
@@ -684,23 +688,23 @@ int main(void){
 					// outred now contains -1 if failed redirection, or unchanged if success
 					outredFlag = output_Redirect(outfile);
 				}
-				if(outredFlag == 2){
-					firstPipe = appendArg(&firstPipe, argstoString(first, 0));
-					execlp("/bin/sh", "sh", "-c", firstPipe->name,(char*)NULL);
+				// If redirecting stdout & error
+				if(outredFlag == 2 && pipeFlag == 0){
+					execlp("/bin/sh", "sh", "-c", argstoString(first, 0),(char*)NULL);
 					perror("execlp");
 					exit(1);
 				}
 				// If output redirection couldn't access output file, exit with exit status 10
 				if(outredFlag == -1){
-					exit(10);
+					exit(1);
 				}
-				// If piping requested, conduct piping and print completion message
+				// If piping requested, conduct piping
 				if(pipeFlag == 1){
-					pipeline(&firstPipe);//, num_pipes);
-					// Print pipeline and exit status of commands in 
+					pipeline(&firstPipe);
 					fprintf(stderr, "+ completed \'%s\' %s\n", cmd, print_Exitstatus(&firstPipe));
 					exit(1);
 				}
+
 				// If no piping, pass parsed command line string to execlp & exit
 				execlp("/bin/sh", "sh", "-c", cmd,(char*)NULL);
 				perror("execlp");
@@ -716,13 +720,15 @@ int main(void){
 				exit_status = WEXITSTATUS(status);
 
 				// If output redirection wanted, but not possible, don't print completion message
-				if(exit_status == 10){
+				if(outredFlag == -1){
 					continue;
 				}
-				// If piping, completion message was already printed in child
+				// If piping print pipeline and exit status of commands in 
 				if(pipeFlag == 1){
+					
 					continue;
 				}
+
 				// Print completion message
 				fprintf(stderr, "+ completed \'%s\' [%d]\n", cmd, exit_status);	
 			}
