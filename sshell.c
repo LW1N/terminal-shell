@@ -6,9 +6,17 @@
 #include <linux/limits.h>
 #include <fcntl.h>
 
+// shell assumes that:
+// max length of command line <= 512 characters
+// program has a maximum of 16 non-null arguments
+// max of 4 pipes
+// max length of individual tokens never exceed 32 characters
 #define CMDLINE_MAX 512
 #define PIPE_MAX 4
-// Output redirection flag, if 0 no redirect - if 1 redirect
+#define VAR_MAX 26
+#define TOKEN_MAX 32
+// Output redirection flag, if 0 no redirect - if 1 redirect, 
+// -1 if combined stdout + stderr redirection
 int outredFlag = 0;
 // Piping flag, if 0 no pipe - if 1 pipe
 int pipeFlag = 0;
@@ -19,11 +27,16 @@ int num_args = 0;
 // Number of programs in a pipeline
 int num_programs = 0;
 // Linked list of program name(first) and arguments
+// Array of environment variables
+char envar[VAR_MAX][TOKEN_MAX];
 
 struct prog{
 	// Program/argument name
 	char* name;
-	// Number corresponding to number of argument(starting at 0)
+	// Number corresponding to index of list item(starting at 0)
+	// In an argument list, corresponds to number of argument
+	// In a pipe/program list, corresponds to number of program, PIDs of children
+	// as well as combined redirection flags(-1 for combined redirection)
 	int argn;
 	// Pointer to next item/argument in list
 	struct prog* next;
@@ -53,15 +66,41 @@ struct prog* appendArg(struct prog** first_ref, char* arg){
 	while(tail->next != NULL){
 		tail = tail->next;
 	}
+
 	// Argument number is simply 1 more than previous
 	new_arg->argn = tail->argn + 1;	
-//TESTING
-	//printf("Arg: %s, Argn: %d\n", new_arg->arg, new_arg->argn);
 	// Tail is now one before last(appended argument)
 	// tail->next then needs to point to appened argument
 	tail->next = new_arg;
 	num_args = new_arg->argn;
 	return new_first;
+}
+
+// Adjust argn of an entry in list to a given number n
+// Used to keep track of combined redirection
+struct prog* adjustArgn(struct prog** first_ref, char* arg, int n){
+	// Used to find end of list
+	struct prog *tail = *first_ref;
+	// Used to return list pointer
+	struct prog *new_first = tail;
+	// Otherwise find last(tail) argument
+	while(tail->name != arg){
+		tail = tail->next;
+	}
+	tail->argn = n;
+	
+	return new_first;
+}
+
+// TESTING FUNCTION
+void printArgn(struct prog** first_ref){
+	struct prog* f = *first_ref;
+	fprintf(stderr, "\n[");
+	while(f != NULL){
+		fprintf(stderr, " %d", f->argn);
+		f = f->next;
+	}
+	fprintf(stderr, "]\n");
 }
 
 // Delete(free) linked list
@@ -85,42 +124,41 @@ void deleteArgs(struct prog** first_ref){
 	*first_ref = NULL;
 }
 
-// Transform linked list into a string to pass to execlp
-char* argstoString(struct prog** first_ref, int pipeF){
+// Transform linked list into a string
+char* argstoString(struct prog* first_ref, int pipeF){
 	// Allocate memory accordingly
 	// str could be entire length of cmd line
-	char* str = (char*) malloc(sizeof(char) * CMDLINE_MAX);
+	char* str =  malloc(CMDLINE_MAX);
 	// Pointer parses linked list from beginning to end
-	struct prog *ptr = *first_ref;
+	struct prog *ptr = first_ref;
 	// i increments length of str based on length of argument added to string 
-	int i = 0;
+	// int i = 0;
 
-	// Parse linked list from first to end
+	strcpy(str, ptr->name);
+	strcat(str, " ");
+	ptr = ptr->next;
 	while(ptr != NULL){
-		// If last argument, no need for trailing space
 		if(ptr->next == NULL){
-			sprintf(str + i, "%s", ptr->name);
-			i += strlen(str + i);
+			strcat(str, ptr->name);
 			break;
 		}
 		// If no piping append argument to string
 		if(pipeF == 0){
-			sprintf(str + i, "%s ", ptr->name);
+			strcat(str, ptr->name);
+			strcat(str, " ");
 		}
 		// If piping, need to add | in between 
 		if(pipeF == 1){
-			sprintf(str + i, "%s | ", ptr->name);
+			strcat(str, ptr->name);
+			strcat(str, " | ");
 		}
-		// i equals length of (string + i)
-		i += strlen(str + i);
-		// ptr becomes next argument in list
 		ptr = ptr->next;
 	}
 
 	return str;
 }
 
-// Close a certain number of pipes
+// Close a certain number of pipes(numo)
 void close_pipes(int array[][2], int nump){
 	for(int i = 0; i <= nump; i++){
 		close(array[i][0]);
@@ -133,7 +171,6 @@ void pipeline(struct prog** first_ref){//, int numP){//int num_pipes){
 	// Number of childern = number of programs = num_pipes + 1
 	pid_t pids[num_pipes+1];
 	// Number of pipes requested
-	//int num_pipes = numP;
 	// Pipe variable, 
 	// fd[pipenumber][read/write access file descriptor]
 	int fd[num_pipes][2];
@@ -141,13 +178,9 @@ void pipeline(struct prog** first_ref){//, int numP){//int num_pipes){
 	struct prog *current = *first_ref;
 	// String to hold current command(program) to be executed
 	char* command;
-	//TESTING
-	// fprintf(stderr, "Number of pipes: %d\n", num_pipes);
 	// Establish pipes depending on how many needed
 	for(int i = 0; i < num_pipes; i++){
 		pipe(fd[i]);
-		//TESTING
-		// fprintf(stderr, "Pipe #%d Read:%d Write:%d\n", i, fd[i][0], fd[i][1]);
 	}
 	// Pipe programs from and into other programs
 	for(int i = 0; i <= num_pipes; i++){
@@ -263,11 +296,17 @@ int output_Redirect(char* outfile_name){
 	}
 	// Redirect stdout to file fd
 	dup2(fd, STDOUT_FILENO);
+	// If outredFlag == 2, combined redirection
+	// Redirect stderr to file fd
+	if(outredFlag == 2){
+		dup2(fd, STDERR_FILENO);
+	}
 	// Close fd
 	close(fd);
 	// Upon successful output redirection, outred flag is unchanged
-	return 1;
+	return outredFlag;
 }
+
 
 // Parse command line and find program(s) to be executed
 char* parseCmd(struct prog** first_ref, struct prog** firstpipe_ref, char command[]){
@@ -276,174 +315,208 @@ char* parseCmd(struct prog** first_ref, struct prog** firstpipe_ref, char comman
 	strcpy(cmdCopy, command);
 	// Delimiter to tokenize command line by
 	char* delimiter = " ";
+	char* delimiter2 = " ";
 	// Pointers to adjust lists
 	struct prog *firstarg = *first_ref;
 	struct prog *firstpipe = *firstpipe_ref;
+	// Pointers to hold reentrants for strtok_r() function
 	char* save = cmdCopy;
-	char* save2;
+	char* save2 = save;
+	// Return string, contains name of output file or NULL if no output redirection
+	char* outfile = "";
+	// Strings to check if >, | or >&, |& were included in command line
+	char* pipe_check;
+	char* outred_check;
+	char* combred_check[2];
+
+	// If there are pipes, set pipeFlag and tokenize by pipes(|)
+	pipe_check = strchr(cmdCopy, '|');
+	if(pipe_check){
+		pipeFlag = 1;
+		delimiter = "|";
+	}
+
 	// Tokenizer
 	char* token = strtok_r(cmdCopy, delimiter, &save);
 	// Copy of token in case need to tokenize token further
 	char* tokenCopy = token;
-	// Return string, contains name of output file or NULL if no output redirection
-	char* outfile = "";
-	// Strings to check if > or | was included without spaces in command line
-	char* pipe_check;
-	char* outred_check;
+	char* tokenCopy2 = token;
 
 	// Parsing cmd string, loop of tokenizing until end of command line string
 	while(token){
+		// Two copies of the token in order for further tokenizing
 		tokenCopy = token;
-		save2 = token;
-		// Check if > or | was included without spaces
-		// If a pipe(|) was included without spaces
-		// i.e. program arg|program arg, or arg|program>outfile
-		//pipe_check = strchr(token, '|');
-		pipe_check = strchr(token, '|');
+		tokenCopy2 = token;
+		// Check if there is output redirection needed
 		outred_check = strchr(token, '>');
-		while((pipe_check  && strlen(pipe_check) > 1)){
-			// Increment number of programs
-			num_programs++;
-			num_pipes++;
-			// Set pipeFlag
-			pipeFlag = 1;
-			// Use pipe_check to tokenize token2 by pipe symbol(|)
-			tokenCopy = strtok_r(tokenCopy, "|", &save2);
-
-			// If arg |program
-			if(pipe_check-token == 0){
-				// Append previous program to be piped to program list and adjust num_programs
-				firstpipe = appendArg(&firstpipe, argstoString(&firstarg, 0));
-				// num_programs++;
-				// Reset program arguments list
-				deleteArgs(&firstarg);
-				// Append program name to arguments list
-				firstarg = appendArg(&firstarg, tokenCopy);
-				// TESTING
-				// fprintf(stderr, "YO YO YO: %s %d\n", argstoString(&firstpipe, 0), num_programs);
-				// Grab next whitespace token, if NULL, break out of loop(end of line)
-				if(!(token = strtok_r(NULL, delimiter, &save))){
-					// Jump out of loops
-					goto ParseEnd;
+		// Check if there is combined redirection needed
+		combred_check[0] = strstr(token, "|&");
+		combred_check[1] = strstr(token, ">&");
+		
+		// Check if environment variable was included w/o piping
+		while(pipeFlag == 0 && token[0] == '$'){
+			// Keep track of environment variable usage with setting pipeFlag to -1
+			pipeFlag = -1;
+			// If invalid variable, throw error,  and return
+			if(strlen(token) != 2 || token[1] < 'a' || token[1] > 'z'){
+				fprintf(stderr, "Error invalid variable name\n");
+				return "";
+			}
+			for(int i = 0; i < VAR_MAX; i++){
+				if(i + 97 == token[1]){
+					firstarg = appendArg(&firstarg, envar[i]);
 				}
-				pipe_check = strchr(token, '|');
-				tokenCopy = token;
-				break;
 			}
-
-			// Append first token to program arguments list
-			firstarg = appendArg(&firstarg, tokenCopy);
-			// Append program to be piped to program list and adjust num_programs
-			firstpipe = appendArg(&firstpipe, argstoString(&firstarg, 0));
-			// Reset program arguments list
-			deleteArgs(&firstarg);
-			// Grab 2nd half of arg|program(>outfile)
-			tokenCopy = strtok_r(NULL, "|", &save2);
-
-			// If arg| program or arg |program
-			// if(!tokenCopy){
-
-			// }
-
-			// If there is also a output redirection > w/o space
-			// i.e. program arg|program>outfile
-			if((outred_check && strlen(outred_check) > 1)){
-				// Tokenize token string by >
-				tokenCopy = strtok_r(tokenCopy, ">", &save2);
-				// Add last argument to argumentt list and append to program(piping) list
-				firstarg = appendArg(&firstarg, tokenCopy);
-				firstpipe = appendArg(&firstpipe, argstoString(&firstarg, 0));
-				// Increment number of programs whenever appending piping list
-				num_programs++;
-				// Grab next token(should be output file)
-				tokenCopy = strtok_r(NULL, ">", &save2);
-				// Store in token, so that parser will recognize
-				token = tokenCopy;
-				// Assert output redirection flag
-				outredFlag = 1;
-				// Go back to parsing by whitespace
-				break;
-			}
-
-			// Append to program args(first arg/program name)
-			// num_programs = appendArg(&firstpipe, tokenCopy);
-			firstarg = appendArg(&firstarg, tokenCopy);
-			
-			// Grab next whitespace token, if NULL, break out of loop(end of line)
-			if(!(token = strtok_r(NULL, delimiter, &save))){
-				// Jump out of loops
+			token = strtok_r(NULL, delimiter, &save);
+			if(!token){
 				goto ParseEnd;
 			}
-			pipe_check = strchr(token, '|');
-			tokenCopy = token;
-			//continue;
 		}
-		// If only program>outfile
-		if(!pipe_check && outred_check && strlen(outred_check) > 1){
+
+		// If output redirection(>) is included w/o piping
+		// i.e. program>out, program> out, or program >out
+		if(outred_check && pipeFlag == 0){
+			outredFlag = 1;
+			delimiter2 = ">";
+			// If >&, combined redirection
+			if(combred_check[1]){
+				outredFlag = 2;
+				delimiter2 = ">&";
+			}
+			// *first_ref = firstarg;
+			*firstpipe_ref = firstpipe;
+
+			// If just a lone >, need to grab last program arg and outfile name
+			if((token[0] == '>' && strlen(outred_check) == 1) || strlen(combred_check[1]) == 2){
+				token = strtok_r(NULL, delimiter, &save);
+				// If next token is NULL, missing command error
+				if(!token){
+					outfile = "";
+					return "";
+				}
+				// If next token != NULL, store as output file
+				outfile = token;
+				// If next token != NULL, mislocated output redirection error
+				token = strtok_r(NULL, delimiter, &save);
+				if(token){
+					deleteArgs(&firstarg);
+					*first_ref = firstarg;
+					outfile = "";
+					return "";
+				}
+
+				// If next token == NULL, at the end of cmd line - STOP PARSING
+				goto ParseEnd;
+			}
+
+			// Grab token
+			tokenCopy2 = strtok_r(tokenCopy, delimiter2, &save2);
+
+			// If >outfile, no need to grab program/program argument
+			if(token[0] == '>'){
+				outfile = tokenCopy2;
+				if((token = strtok_r(NULL, delimiter, &save))){
+					outfile = "";
+				}
+				return outfile;
+			}
+
+			// Else if prog>out or prog> out, need to grab program argument
+			firstarg = appendArg(&firstarg, tokenCopy2);
+			*first_ref = firstarg;
+
+			// If next token is NULL, prog> [could be prog> out or prog> NULL]
+			tokenCopy2 = strtok_r(NULL, delimiter2, &save2);
+			if(!tokenCopy2){
+				// If next token is NULL, prog> NULL
+				token = strtok_r(NULL, delimiter, &save);
+				if(!token){
+					outfile = "";
+				}
+				outfile = token;
+				// if not end of line, mislocated output redirection error
+				token = strtok_r(NULL, delimiter, &save);
+				if(token){
+					outfile = "";
+				}
+				return outfile;
+			}
+			// This would be if prog>outfile
+			outfile = tokenCopy2;
+			tokenCopy2 = strtok(NULL, delimiter2);
+			token = strtok_r(NULL, delimiter, &save);
+			if(token){
+				outfile = "";
+			}
 			return outfile;
 		}
-		// ERROR MANAGEMENT
-		// If output redirection(>) or pipe(|) but no arguments
-		// Assert output redirection flag, with first as NULL and break to throw error
-		if((token[0] == '|' || token[0] == '>') && num_args == 0){
-			// Adjust pointers b/c of modifications
-			*first_ref = firstarg;
-			*firstpipe_ref = firstpipe;
-			outredFlag = 1;
-			deleteArgs(&firstarg);
-			return "";
-		}
-		// if output redirection needed, grab name of output file
-		if(outredFlag == 1){
-			*first_ref = firstarg;
-			*firstpipe_ref = firstpipe;
-			outfile = token;
-			// if(!(token = strtok(NULL, delimiter))){
-			// 	return outfile;
-			// }
-			// If next token != NULL output redirection misplaced(not at end of cmd line)
-			if((token = strtok_r(NULL, delimiter, &save))){
-				outfile = "";
-				break;
+		tokenCopy2 = strtok_r(tokenCopy, " ", &save2);
+		//outred_check = strchr(token, '>');
+		// If there are pipes, tokenize token of command line into program arguments
+		while(pipeFlag == 1 && tokenCopy2){			
+			// Grab program argument and append to firstarg
+			firstarg = appendArg(&firstarg, tokenCopy2);
+
+			// If tokenCopy2 is NULL, end of program arguments
+			tokenCopy2 = strtok_r(NULL, " ", &save2);
+			if(!tokenCopy2){
+				// If next token is NULL, end of line
+				if(!(token = strtok_r(NULL, delimiter, &save))){
+					goto ParseEnd;
+				}
+				// If next token isn't null and there's an output redirection request
+				// Error: output redirection misplacement
+				if(token && outred_check){
+					outredFlag = 1;
+					// Adjust pointers b/c of modifications
+					*first_ref = firstarg;
+					*firstpipe_ref = firstpipe;
+					outfile = "";
+					return "";
+				}
+
+				// Append found program+arguments to firstpipe
+				firstpipe = appendArg(&firstpipe, argstoString(firstarg, 0));
+				// Increment # of programs everytime a program is appended to firstpipe
+				num_programs++;
+				// Increment # of pipes everytime a program is appended and it is not the end of line
+				num_pipes++;
+				// Reset/Clear program arguments list for next iteration
+				deleteArgs(&firstarg);
 			}
-			// If next token == NULL, at the end of cmd line - STOP PARSING
-			break;
 		}
-		// If user is asking for output redirection,  assert flag
-		if(token[0] == '>'){
-			outredFlag = 1;
-		}
-		// If user is asking for piping, convert argument list to string
-		// Add string(program + args) to list of pipes
-		if(token[0] == '|'){
-		//if(cmd[token-cmdCopy+strlen(token)] == '|'){
-			num_pipes++;
-			// num_programs = appendArg(&firstpipe, argstoString(&firstarg, 0));
-			firstpipe = appendArg(&firstpipe, argstoString(&firstarg, 0));
-			num_programs++;
-			// Empy/reset list of args
-			deleteArgs(&firstarg);
-			// Assert flag
-			pipeFlag = 1;
-		}
-		// Append next arg to linked list
-		// If there is output redirection, linked list represents everything before >
-		if(outredFlag == 0 && token[0] != '>' && token[0] != '|'){//cmd[token-cmdCopy+strlen(token)] == '|'){ 
+		// If no piping and no output redirection seen
+		if(pipeFlag == 0 && outredFlag == 0){
 			firstarg = appendArg(&firstarg,token);
+			// fprintf(stderr, "TESTS: %s\n", argstoString(firstarg, 0));
+			token = strtok_r(NULL, delimiter, &save);
 		}
-		// Grab next token
-		//token = strtok(NULL, delimiter);
-		token = strtok_r(NULL, delimiter, &save);
 	}
 	// Label to jump out of nested while loop
 ParseEnd:
 	// If piping, grab missed last program to be piped
 	if(pipeFlag == 1 && firstarg != NULL){
-		firstpipe = appendArg(&firstpipe, argstoString(&firstarg, 0));
+		// If last missed program was output redirection, redirect output
+		if(outred_check){
+			outredFlag = 1;
+			// Tokenize by > to separate last program from output file
+			token = strtok(argstoString(firstarg, 0), ">");
+			// Append last program to program list(firstpipe)
+			firstpipe = appendArg(&firstpipe, token);
+			num_programs++;
+			// Grab next token, which should be output file
+			token = strtok(NULL, ">");
+			outfile = token;
+			*first_ref = firstarg;
+			*firstpipe_ref = firstpipe;
+			return outfile;
+		}
+		// If last missed program was not output redirection, append to program list
+		firstpipe = appendArg(&firstpipe, argstoString(firstarg, 0));
 		// Increment number of programs anytime one is appended to piping list
 		num_programs++;
 	}
-	// Adjust pointers b/c of modifications
+	// Adjust pointers b/c of modifications and return name of outfile(null if no output redirection or error)
 	*first_ref = firstarg;
 	*firstpipe_ref = firstpipe;
 	return outfile;
@@ -452,22 +525,25 @@ ParseEnd:
 int main(void){
 		// Command line storage strings
 		char cmd[CMDLINE_MAX];
-		// char cmdCopy[CMDLINE_MAX];
-		// Delimiter to parse command line by
-		// char* delimiter = " ";
 		// Variable to hold current working directory(cwd)
 		char cwd[PATH_MAX];
 		// Initialize first item in argument list(program name) as NULL
 		struct prog *first = NULL;
 		// Initialize first item in program list(first program to be piped) as NULL
 		struct prog *firstPipe = NULL;
+		// If there is redirection, outfile is name of output file
+		char* outfile;
+		// Initialize all strings in envar as empty
+		for(int i = 0; i < VAR_MAX; i++){
+			strcpy(envar[i], "");
+		}
+		// char* temp;
+		// char* ts;
 		
-
 		while (1){
 			char *nl;
 //			int retval;
-			// If there is redirection, outfile is name of output file
-			char* outfile;
+			// char* outfile;
 			// Empty/reset linked lists of args/progs
 			deleteArgs(&first);
 			deleteArgs(&firstPipe);
@@ -481,7 +557,6 @@ int main(void){
 			num_args = 0;
 			// Number of programs in a pipeline
 			num_programs = 0;
-
 
 			// Provided Code
 			/* Print prompt */
@@ -510,27 +585,38 @@ int main(void){
 				continue;
 			}
 
+			// Parse the command line
 			outfile = parseCmd(&first, &firstPipe, cmd);
 			
-			// // TESTING
-			// fprintf(stderr, "OUTFILE: %s\n", outfile);
-			// fprintf(stderr, "PIPELINE: %s\n", argstoString(&firstPipe, 0));
-			// fprintf(stderr, "NUMBER OF PIPES: %d\n", num_pipes);
-			// // printf("The number of pipes: %d\n", num_pipes);
-			// // printf("The number of arguments: %d\n",num_args);
-			// fprintf(stderr, "The number of programs: %d\n",num_programs);
-			// fprintf(stderr, "OUTFILE: %s\n", outfile);
-
+			if(pipeFlag == -1){
+				char* thing = malloc(CMDLINE_MAX);
+				firstPipe = appendArg(&firstPipe, argstoString(first, 0));
+				strcpy(thing, firstPipe->name);
+				strcpy(cmd, thing);
+				free(thing);
+			}
+			
+			
+			
 			// ERROR MANAGEMENT
+			if(outredFlag == -1 && outfile[0] == '\0'){
+				continue;
+			}
 			// Error: too many process arguments
 			// Print to stderr if more thatn 16 program arguments
 			if(num_args >= 16){
 				fprintf(stderr, "Error: too many process arguments\n");
 				continue;
 			}
+			// Error: mislocated output redirection
+			// If output redirection(>) requested but not at end of command line
+			if(outredFlag > 0 && outfile[0] == '\0'){
+				fprintf(stderr, "Error: mislocated output redirection\n");
+				continue;
+			}
 			// Error: missing command
 			// If output redirection(>) requested in shell but no command requested
-			if(outredFlag == 1 && first == NULL){
+			if(outredFlag > 0 && first == NULL){
 				fprintf(stderr, "Error: missing command\n");
 				continue;
 			}
@@ -543,15 +629,7 @@ int main(void){
 				fprintf(stderr, "Error: missing command\n");
 				continue;
 			}
-			// Error: mislocated output redirection
-			// If output redirection(>) requested but not at end of command line
-			if(outredFlag == 1 && outfile[0] == '\0'){
-				fprintf(stderr, "Error: mislocated output redirection\n");
-				continue;
-			}
 			
-			
-			/* Builtin commands */ 
 			// Builtin cd command
 			if(!strcmp(first->name, "cd")){
 				if(!first->next){
@@ -564,30 +642,53 @@ int main(void){
 				// If unsuccessful, throw error
 				if(chdir(newdir)){
 					fprintf(stderr, "Error: cannot cd into directory\n");
+					fprintf(stderr, "+ completed \'%s\' [1]\n", cmd);
 					continue;
 				}
-				// Print completion message
-				fprintf(stderr, "+ completed '%s' [0]\n", cmd);
-				continue;
-			}
-			
-			// Builtin pwd command
-			if(!strcmp(first->name, "pwd")){
-				// Retrieve current working directory(cwd)
-				getcwd(cwd, sizeof(cwd));
-				// Print cwd to stdout along with completion message
-				printf("%s\n", cwd);
-				fprintf(stderr, "+ completed '%s' [0]\n", cmd);
+				fprintf(stderr, "+ completed \'%s\' [0]\n", cmd);
 				continue;
 			}
 
+			// Builtin set command
+			if(!strcmp(first->name, "set")){
+				// If trying to set nothing or invalid variable, throw error and exit
+				if(!first->next || first->next->name[0] < 'a' || first->next->name[0] > 'z' || strlen(first->next->name) > 1){
+					fprintf(stderr, "Error: invalid variable name\n");
+					continue;
+				}
+				// Find variable in envar array of strings and set value
+				for(int i = 0; i < VAR_MAX; i++){
+					if(i+97 == first->next->name[0]){
+						strcpy(envar[i], first->next->next->name);
+						fprintf(stderr, "+ completed \'%s\' [0]\n", cmd);
+						continue;
+					}
+				}
+			}
+						
 			/* Regular command */
 			// Child Process
 			if(!fork()){
+				/* Builtin commands */ 
+				// Builtin pwd command
+				if(!strcmp(first->name, "pwd")){
+					// Retrieve current working directory(cwd)
+					getcwd(cwd, sizeof(cwd));
+					// Print cwd to stdout
+					printf("%s\n", cwd);
+					exit(1);
+				}
+
 				// If output redirection requested, redirect output to outfile
-				if(outredFlag == 1){
-					// outred now contains -1 if failed redirection, or 1 if success
+				if(outredFlag > 0){
+					// outred now contains -1 if failed redirection, or unchanged if success
 					outredFlag = output_Redirect(outfile);
+				}
+				if(outredFlag == 2){
+					firstPipe = appendArg(&firstPipe, argstoString(first, 0));
+					execlp("/bin/sh", "sh", "-c", firstPipe->name,(char*)NULL);
+					perror("execlp");
+					exit(1);
 				}
 				// If output redirection couldn't access output file, exit with exit status 10
 				if(outredFlag == -1){
@@ -625,11 +726,6 @@ int main(void){
 				// Print completion message
 				fprintf(stderr, "+ completed \'%s\' [%d]\n", cmd, exit_status);	
 			}
-			
-			// Old return status for skeleton code
-			// retval = system(cmd);
-			// fprintf(stdout, "Return status value for '%s': %d\n",
-			// cmd, retval);
 		}
 		return EXIT_SUCCESS;
 }
