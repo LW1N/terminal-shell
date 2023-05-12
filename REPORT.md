@@ -1,4 +1,4 @@
-# <b>Project 1 Report| Lucas Nguyen, Youssef Qteishat</b>
+# <b>Project Report | Lucas Nguyen, Youssef Qteishat</b>
 
 ## <u>Parsing Command Line:</u>
 Initially, we suggested storing the program name and parameters in an array, but later we realized that it would be easier to parse through the command line if it were stored in a linked list.
